@@ -159,6 +159,108 @@ Logstash no escucha en 5044
 
 El pipeline no cargo, Logstash esta detenido o la configuracion cargada no es la esperada.
 
+### Caso confirmado: `connection refused` en 5044
+
+Si Filebeat muestra:
+
+```text
+dial tcp 172.19.216.170:5044: connect: connection refused
+```
+
+Y `nc` confirma:
+
+```bash
+nc -vz 172.19.216.170 5044
+```
+
+Con salida similar a:
+
+```text
+Ncat: Connection refused.
+```
+
+El host `172.19.216.170` es alcanzable, pero no hay ningun proceso aceptando conexiones en TCP 5044 o el puerto esta siendo rechazado activamente.
+
+Confirmar si existe un listener:
+
+```bash
+sudo ss -ltnp | grep 5044
+```
+
+Si no devuelve nada, Logstash no levanto el input `beats` en ese puerto.
+
+Un `tcpdump` con respuesta `Flags [R.]` tambien confirma rechazo TCP:
+
+```bash
+sudo tcpdump -ni any tcp port 5044 -c 20
+```
+
+Ejemplo:
+
+```text
+172.19.216.170.50158 > 172.19.216.170.5044: Flags [S]
+172.19.216.170.5044 > 172.19.216.170.50158: Flags [R.]
+```
+
+El `S` es el intento de conexion y el `R` es el rechazo. En este caso el siguiente paso no es ClickHouse, sino levantar correctamente Logstash en 5044.
+
+Revisar estado y logs:
+
+```bash
+sudo systemctl status logstash --no-pager
+sudo journalctl -u logstash -n 200 --no-pager
+sudo tail -n 200 /var/log/logstash/logstash-plain.log
+```
+
+Confirmar que el pipeline este referenciado:
+
+```bash
+cat /etc/logstash/pipelines.yml
+sudo grep -R "netflow_clickhouse_9995.conf\|port => 5044" /etc/logstash /usr/share/logstash -n
+```
+
+Si `/etc/logstash/pipelines.yml` no referencia el archivo, agregar:
+
+```yaml
+- pipeline.id: netflow_clickhouse_9995
+  path.config: "/usr/share/logstash/netflow_clickhouse_9995.conf"
+```
+
+Validar antes de reiniciar:
+
+```bash
+sudo /usr/share/logstash/bin/logstash --path.settings /etc/logstash \
+  --config.test_and_exit \
+  -f /usr/share/logstash/netflow_clickhouse_9995.conf
+```
+
+Si la validacion termina correctamente, reiniciar y volver a verificar:
+
+```bash
+sudo systemctl restart logstash
+sleep 10
+sudo systemctl status logstash --no-pager
+sudo ss -ltnp | grep 5044
+```
+
+Resultado esperado:
+
+```text
+LISTEN ... :5044 ... java
+```
+
+Finalmente, probar otra vez desde Filebeat:
+
+```bash
+sudo filebeat test output -c /etc/filebeat/filebeat.yml
+```
+
+Resultado esperado:
+
+```text
+dial up... OK
+```
+
 ## 4. Confirmar que Logstash esta usando el pipeline correcto
 
 Revisar como arranca Logstash:
@@ -341,6 +443,12 @@ Hay UDP 9995 pero Filebeat no conecta a 5044
 Problema en Filebeat, output.logstash o conectividad hacia Logstash.
 
 ```text
+dial tcp 172.19.216.170:5044: connect: connection refused
+```
+
+Logstash no esta escuchando en 5044 o el puerto esta siendo rechazado. Revisar `systemctl status logstash`, `ss -ltnp | grep 5044`, logs y `pipelines.yml`.
+
+```text
 Logstash no escucha en 5044
 ```
 
@@ -402,4 +510,3 @@ Logstash pipeline
 Logstash -> ClickHouse
 ClickHouse tabla/schema
 ```
-
